@@ -14,6 +14,7 @@ import express, { type Request, type Response, type NextFunction } from 'express
 import Anthropic from '@anthropic-ai/sdk';
 
 import { buildClaudePrompt } from './src/lib/storyEngine.ts';
+import { buildReviewPrompt } from './src/lib/storyReviewer.ts';
 import type { StoryConfig } from './src/types.ts';
 
 const PORT = Number(process.env.PORT) || 8787;
@@ -185,6 +186,45 @@ app.post('/api/generate-story', rateLimiter, async (req, res) => {
   } catch (e) {
     console.error('generate-story:', e);
     res.status(500).json({ error: 'Failed to generate story. Please try again.' });
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/*  Story Review endpoint — Claude semantic reviewer                   */
+/* ------------------------------------------------------------------ */
+
+app.post('/api/review-story', rateLimiter, async (req, res) => {
+  try {
+    const { title, content, config, codeValidation } = req.body ?? {};
+
+    if (typeof title !== 'string' || typeof content !== 'string') {
+      res.status(400).json({ error: 'Missing title or content' });
+      return;
+    }
+    if (!config || typeof config !== 'object') {
+      res.status(400).json({ error: 'Missing config' });
+      return;
+    }
+
+    const prompt = buildReviewPrompt(
+      { title, content: sanitizeString(content, 15000) },
+      config as StoryConfig,
+      codeValidation ?? { valid: false, issues: [], score: 0, breakdown: {} },
+    );
+
+    const client = new Anthropic({ apiKey: apiKey() });
+    const msg = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2048,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const block = msg.content[0];
+    const text = block?.type === 'text' ? block.text : '';
+    res.json({ text });
+  } catch (e) {
+    console.error('review-story:', e);
+    res.status(500).json({ error: 'Failed to review story. Please try again.' });
   }
 });
 
