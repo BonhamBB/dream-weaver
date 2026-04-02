@@ -603,12 +603,51 @@ It is 4-6 sentences. It MUST:
    'And now your eyes are getting heavy too...'
    'The story will be here when you wake...'
    'Let the stars carry you into your own dream...'
+The Dream Bridge must FLOW NATURALLY from the story — it's the story exhaling,
+not an abrupt gear-shift. The last scene before Dream Bridge should already be
+winding down (slower action, softer dialogue, arriving home or settling in).
 This section is non-negotiable. Every story ends with it.`;
+
+  const ruleWorldCoherence = `RULE 8 — WORLD COHERENCE (CRITICAL):
+Every element you introduce MUST be explained and used:
+- If there is a cave → explain WHY it exists, WHO lives there, and USE it in the plot.
+- If a character is mentioned (grandmother, king, friend) → they MUST have a role. No decorative mentions.
+- If a setting is described → it must MATTER to the plot. A forest must affect the journey. A mountain must be climbed.
+- If a rule of the world is stated (e.g., "the dragon eats worlds") → it must be TRUE, or the consequences of it being FALSE must be explored.
+FORBIDDEN: Introducing any character, place, or rule that doesn't pay off by the end.`;
+
+  const ruleSolutionDepth = `RULE 9 — SOLUTION DEPTH (CRITICAL):
+The hero's problem CANNOT be solved instantly or easily.
+- The hero must TRY something that FAILS first (at least one failed attempt).
+- The hero must SACRIFICE something, CHANGE something about themselves, or EARN the solution through effort.
+- Understanding/empathy must be BUILT UP — never instant. Show the process:
+  confusion → curiosity → small clue → deeper understanding → breakthrough.
+- FORBIDDEN: "suddenly understood", "instantly realized", "magically knew", "everything made sense".
+- The villain/obstacle must have REAL weight. If the antagonist turns out to be misunderstood,
+  the hero must WORK to see past the surface — not just be told.`;
+
+  const rulePlotThreads = `RULE 10 — NO OPEN THREADS:
+Before writing, mentally list every character, location, and subplot you plan to introduce.
+EVERY thread must be resolved:
+- Every character who appears must have a clear exit (they leave, they transform, they stay — but it's clear).
+- Every question raised must be answered (even if the answer is "some mysteries are meant to stay").
+- Every promise made in the setup must be delivered in the resolution.
+Self-check before finishing: "Is there anything I mentioned that I forgot to resolve?"`;
+
+  const ruleBedtimeTone = `RULE 11 — BEDTIME TONE:
+This is a BEDTIME story. The child will fall asleep to this. Therefore:
+- NO characters disappearing "into shadows" or "into darkness" ominously.
+- NO unexplained creepy imagery (empty caves, figures lurking, whispers with no source).
+- Conflict is allowed in the MIDDLE of the story, but the last third MUST wind down.
+- The emotional trajectory must be: wonder → tension → resolution → warmth → sleep.
+- Use sensory comfort language in the final sections: warm, soft, gentle, golden light, quiet, cozy.
+- If a scary element exists (dragon, storm, darkness), it MUST be fully resolved and made safe
+  before the story enters its final quarter.`;
 
   const interactive = ruleInteractive(config.mode);
 
   return `You are a master bedtime story writer. Write a story for children.
-Follow every rule below exactly.
+Follow every rule below exactly. You will be SCORED on each rule.
 
 ${rule1}
 
@@ -621,6 +660,14 @@ ${ruleAgeDepth(config)}
 ${themeRule}
 
 ${dreamBridge}
+
+${ruleWorldCoherence}
+
+${ruleSolutionDepth}
+
+${rulePlotThreads}
+
+${ruleBedtimeTone}
 ${interactive}
 
 RULE 6 — LENGTH:

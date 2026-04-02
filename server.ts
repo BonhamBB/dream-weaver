@@ -15,6 +15,7 @@ import Anthropic from '@anthropic-ai/sdk';
 
 import { buildClaudePrompt } from './src/lib/storyEngine.ts';
 import { buildReviewPrompt } from './src/lib/storyReviewer.ts';
+import { buildFixPrompt } from './src/lib/storyFixer.ts';
 import type { StoryConfig } from './src/types.ts';
 
 const PORT = Number(process.env.PORT) || 8787;
@@ -225,6 +226,46 @@ app.post('/api/review-story', rateLimiter, async (req, res) => {
   } catch (e) {
     console.error('review-story:', e);
     res.status(500).json({ error: 'Failed to review story. Please try again.' });
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/*  Story Fix endpoint — Claude auto-fix for rejected stories          */
+/* ------------------------------------------------------------------ */
+
+app.post('/api/fix-story', rateLimiter, async (req, res) => {
+  try {
+    const { title, content, config, codeValidation, reviewResult } = req.body ?? {};
+
+    if (typeof title !== 'string' || typeof content !== 'string') {
+      res.status(400).json({ error: 'Missing title or content' });
+      return;
+    }
+    if (!config || typeof config !== 'object') {
+      res.status(400).json({ error: 'Missing config' });
+      return;
+    }
+
+    const prompt = buildFixPrompt(
+      { title, content: sanitizeString(content, 15000) },
+      config as StoryConfig,
+      codeValidation ?? { valid: false, issues: [], score: 0, breakdown: {} },
+      reviewResult ?? null,
+    );
+
+    const client = new Anthropic({ apiKey: apiKey() });
+    const msg = await client.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 8192,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    const block = msg.content[0];
+    const text = block?.type === 'text' ? block.text : '';
+    res.json({ text });
+  } catch (e) {
+    console.error('fix-story:', e);
+    res.status(500).json({ error: 'Failed to fix story. Please try again.' });
   }
 });
 

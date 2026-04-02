@@ -2,16 +2,24 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * Story generation with the Story Rationality Control Model:
+ * Story Rationality Control Model — Full Pipeline (6 Layers)
  *
- * Pipeline:
- *  1. Generate 2 stories in parallel (carousel)
- *  2. Run code validation (Layer 1) on both — instant, deterministic
- *  3. Pick the best candidate by code score
- *  4. Run Claude semantic review (Layer 2) on the best candidate
+ * Layer 0: Prompt Fortification (storyEngine.ts — rules 8-11)
+ * Layer 1: Code Validation (storyValidator.ts — 12 automated checks)
+ * Layer 2: Claude Semantic Review (storyReviewer.ts — 7 dimensions)
+ * Layer 3: Auto-Fix (storyFixer.ts — targeted rewrite of failed stories)
+ * Layer 4: Historical Learning (storyMemory.ts — track patterns)
+ * Layer 5: Parent Feedback (storyFeedback.ts — ratings loop)
+ *
+ * Pipeline flow:
+ *  1. Check history for theme warnings (Layer 4)
+ *  2. Generate 2 stories in parallel with fortified prompt (Layer 0)
+ *  3. Code validate both (Layer 1), pick best
+ *  4. Claude review the best (Layer 2)
  *  5. Combine scores → accept or reject
- *  6. If rejected, try the second candidate (if its code score was decent)
- *  7. If both rejected → fallback story
+ *  6. If rejected → auto-fix (Layer 3) → re-validate
+ *  7. Record result in history (Layer 4)
+ *  8. Final fallback if all else fails
  */
 
 import { buildClaudePrompt } from '../lib/storyEngine';
@@ -19,6 +27,7 @@ import { fallbackStoryPayload } from '../lib/fallbackStory';
 import type { AppLangCode } from '../lib/lang';
 import { validateStory, type ValidationResult } from '../lib/storyValidator';
 import { parseReviewResponse, combineScores, type ReviewResult } from '../lib/storyReviewer';
+import { recordGeneration, isThemeStruggling, getThemeWeaknesses } from '../lib/storyMemory';
 import type { StoryConfig } from '../types';
 
 export interface GeneratedStoryPayload {
@@ -26,7 +35,7 @@ export interface GeneratedStoryPayload {
   content: string;
 }
 
-/** Quality metadata attached to the generated story for debugging */
+/** Quality metadata attached to the generated story */
 export interface StoryQualityReport {
   codeScore: number;
   reviewScore: number | null;
@@ -36,6 +45,10 @@ export interface StoryQualityReport {
   codeIssues: string[];
   reviewIssues: string[];
   breakdown: Record<string, number>;
+  /** Whether auto-fix was applied */
+  fixApplied: boolean;
+  /** Pipeline step where story was accepted */
+  acceptedAt: 'carousel' | 'runner-up' | 'auto-fix' | 'soft-accept' | 'fallback';
 }
 
 function parseStoryJson(raw: string): GeneratedStoryPayload | null {
@@ -53,10 +66,7 @@ function parseStoryJson(raw: string): GeneratedStoryPayload | null {
       parsed.title.length > 0 &&
       parsed.content.length > 0
     ) {
-      return {
-        title: parsed.title,
-        content: parsed.content,
-      };
+      return { title: parsed.title, content: parsed.content };
     }
   } catch {
     return null;
@@ -64,7 +74,8 @@ function parseStoryJson(raw: string): GeneratedStoryPayload | null {
   return null;
 }
 
-/** Call the generate-story API once */
+/* ─── API Callers ─────────────────────────────────────────────────── */
+
 async function callGenerate(prompt: string): Promise<string> {
   const res = await fetch('/api/generate-story', {
     method: 'POST',
@@ -80,7 +91,6 @@ async function callGenerate(prompt: string): Promise<string> {
   return data.text ?? '';
 }
 
-/** Call the review-story API (Layer 2 semantic review) */
 async function callReview(
   story: GeneratedStoryPayload,
   config: StoryConfig,
@@ -98,35 +108,98 @@ async function callReview(
       }),
     });
     if (!res.ok) return null;
-
     const data = (await res.json()) as { text?: string; error?: string };
     if (!data.text) return null;
-
     return parseReviewResponse(data.text);
   } catch {
-    // Review is non-critical — story can still pass with code-only validation
     return null;
   }
 }
+
+async function callFix(
+  story: GeneratedStoryPayload,
+  config: StoryConfig,
+  codeValidation: ValidationResult,
+  reviewResult: ReviewResult | null,
+): Promise<GeneratedStoryPayload | null> {
+  try {
+    const res = await fetch('/api/fix-story', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: story.title,
+        content: story.content,
+        config,
+        codeValidation,
+        reviewResult,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { text?: string; error?: string };
+    if (!data.text) return null;
+    return parseStoryJson(data.text);
+  } catch {
+    return null;
+  }
+}
+
+/* ─── Pipeline ────────────────────────────────────────────────────── */
 
 interface Candidate {
   payload: GeneratedStoryPayload;
   codeResult: ValidationResult;
 }
 
+function buildReport(
+  codeResult: ValidationResult,
+  reviewResult: ReviewResult | null,
+  finalScore: number,
+  accepted: boolean,
+  reason: string,
+  fixApplied: boolean,
+  acceptedAt: StoryQualityReport['acceptedAt'],
+): StoryQualityReport {
+  return {
+    codeScore: codeResult.score,
+    reviewScore: reviewResult?.score ?? null,
+    finalScore,
+    accepted,
+    reason,
+    codeIssues: codeResult.issues,
+    reviewIssues: reviewResult?.issues ?? [],
+    breakdown: codeResult.breakdown,
+    fixApplied,
+    acceptedAt,
+  };
+}
+
 /**
- * Full pipeline: generate → validate → review → select best story.
- *
- * Returns both the story payload and the quality report.
+ * Full 6-layer pipeline: fortified prompt → carousel → validate →
+ * review → fix if needed → record history → return best story.
  */
 export async function generateStoryWithCarousel(
   config: StoryConfig,
 ): Promise<GeneratedStoryPayload & { qualityReport?: StoryQualityReport }> {
   const langCode = (config.storyLanguage || 'en') as AppLangCode;
-  const prompt = buildClaudePrompt(config);
+  const theme = config.theme ?? 'daily';
 
   try {
-    // ── Step 1: Generate 2 stories in parallel ──────────────────
+    // ── Layer 4: Check history for theme warnings ───────────────
+    let prompt = buildClaudePrompt(config);
+
+    if (isThemeStruggling(theme)) {
+      const weaknesses = getThemeWeaknesses(theme);
+      if (weaknesses.length > 0) {
+        const warning = `\n\nIMPORTANT — HISTORICAL QUALITY WARNING:
+This theme has had recurring quality issues. PAY EXTRA ATTENTION to avoid these:
+${weaknesses.map((w) => `- ${w}`).join('\n')}
+These are the most common problems. Address them proactively in your story.`;
+        prompt += warning;
+        console.log(`[QC] Layer 4: Added ${weaknesses.length} historical warnings for theme "${theme}"`);
+      }
+    }
+
+    // ── Layer 0+1: Generate 2 stories (fortified prompt) & validate ─
     const [rawA, rawB] = await Promise.all([
       callGenerate(prompt),
       callGenerate(prompt),
@@ -135,119 +208,152 @@ export async function generateStoryWithCarousel(
     const storyA = parseStoryJson(rawA);
     const storyB = parseStoryJson(rawB);
 
-    // ── Step 2: Code validation (Layer 1) on both ───────────────
     const candidates: Candidate[] = [];
-
     if (storyA) {
-      candidates.push({
-        payload: storyA,
-        codeResult: validateStory(storyA.content, config),
-      });
+      candidates.push({ payload: storyA, codeResult: validateStory(storyA.content, config) });
     }
     if (storyB) {
-      candidates.push({
-        payload: storyB,
-        codeResult: validateStory(storyB.content, config),
-      });
+      candidates.push({ payload: storyB, codeResult: validateStory(storyB.content, config) });
     }
 
     if (candidates.length === 0) {
+      recordGeneration({
+        timestamp: new Date().toISOString(),
+        theme, language: langCode,
+        codeScore: 0, reviewScore: null, finalScore: 0,
+        accepted: false, fixApplied: false, issues: ['Both generations failed to parse'],
+      });
       return fallbackStoryPayload(langCode);
     }
 
-    // Sort by code score descending
     candidates.sort((a, b) => b.codeResult.score - a.codeResult.score);
-
     console.log(
-      `[QC] Carousel scores: ${candidates.map((c, i) => `Story ${i + 1}: ${c.codeResult.score}`).join(' | ')}`,
+      `[QC] Carousel: ${candidates.map((c, i) => `Story ${i + 1}: ${c.codeResult.score}`).join(' | ')}`,
     );
 
-    // ── Step 3: If best candidate has very low code score, skip review ──
     const best = candidates[0]!;
+
+    // Very low code score = skip everything
     if (best.codeResult.score < 30) {
-      console.log('[QC] Both stories below minimum code threshold — using fallback');
+      console.log('[QC] Both below minimum — attempting auto-fix on best');
+      // Still try auto-fix before giving up
+      const fixed = await callFix(best.payload, config, best.codeResult, null);
+      if (fixed) {
+        const fixedCode = validateStory(fixed.content, config);
+        if (fixedCode.score >= 50) {
+          console.log(`[QC] Auto-fix salvaged story: ${fixedCode.score}`);
+          const report = buildReport(fixedCode, null, fixedCode.score, true, 'Salvaged via auto-fix', true, 'auto-fix');
+          recordGeneration({
+            timestamp: new Date().toISOString(),
+            theme, language: langCode,
+            codeScore: fixedCode.score, reviewScore: null, finalScore: fixedCode.score,
+            accepted: true, fixApplied: true, issues: fixedCode.issues,
+          });
+          return { ...fixed, qualityReport: report };
+        }
+      }
+      recordGeneration({
+        timestamp: new Date().toISOString(),
+        theme, language: langCode,
+        codeScore: best.codeResult.score, reviewScore: null, finalScore: best.codeResult.score,
+        accepted: false, fixApplied: true, issues: best.codeResult.issues,
+      });
       return fallbackStoryPayload(langCode);
     }
 
-    // ── Step 4: Claude semantic review (Layer 2) on best candidate ──
+    // ── Layer 2: Claude semantic review on best ─────────────────
     const reviewResult = await callReview(best.payload, config, best.codeResult);
-
     if (reviewResult) {
-      console.log(`[QC] Review score: ${reviewResult.score}/100`);
-      if (reviewResult.issues.length > 0) {
-        console.log(`[QC] Review issues: ${reviewResult.issues.join('; ')}`);
-      }
-    } else {
-      console.log('[QC] Review unavailable — proceeding with code-only');
+      console.log(`[QC] Review: ${reviewResult.score}/100`);
     }
 
-    // ── Step 5: Combine scores ──────────────────────────────────
+    // ── Combine scores ──────────────────────────────────────────
     const decision = combineScores(best.codeResult, reviewResult);
     console.log(`[QC] Decision: ${decision.reason}`);
 
     if (decision.accepted) {
-      return {
-        ...best.payload,
-        qualityReport: {
-          codeScore: best.codeResult.score,
-          reviewScore: reviewResult?.score ?? null,
-          finalScore: decision.finalScore,
-          accepted: true,
-          reason: decision.reason,
-          codeIssues: best.codeResult.issues,
-          reviewIssues: reviewResult?.issues ?? [],
-          breakdown: best.codeResult.breakdown,
-        },
-      };
+      const report = buildReport(best.codeResult, reviewResult, decision.finalScore, true, decision.reason, false, 'carousel');
+      recordGeneration({
+        timestamp: new Date().toISOString(),
+        theme, language: langCode,
+        codeScore: best.codeResult.score, reviewScore: reviewResult?.score ?? null,
+        finalScore: decision.finalScore,
+        accepted: true, fixApplied: false,
+        issues: [...best.codeResult.issues, ...(reviewResult?.issues ?? [])],
+      });
+      return { ...best.payload, qualityReport: report };
     }
 
-    // ── Step 6: Try second candidate if available ────────────────
+    // ── Try runner-up ───────────────────────────────────────────
     if (candidates.length > 1) {
       const runner = candidates[1]!;
       if (runner.codeResult.score >= 40) {
-        console.log(`[QC] Trying runner-up (code score: ${runner.codeResult.score})`);
+        console.log(`[QC] Trying runner-up (code: ${runner.codeResult.score})`);
         const runnerReview = await callReview(runner.payload, config, runner.codeResult);
         const runnerDecision = combineScores(runner.codeResult, runnerReview);
 
         if (runnerDecision.accepted) {
-          console.log(`[QC] Runner-up accepted: ${runnerDecision.reason}`);
-          return {
-            ...runner.payload,
-            qualityReport: {
-              codeScore: runner.codeResult.score,
-              reviewScore: runnerReview?.score ?? null,
-              finalScore: runnerDecision.finalScore,
-              accepted: true,
-              reason: runnerDecision.reason,
-              codeIssues: runner.codeResult.issues,
-              reviewIssues: runnerReview?.issues ?? [],
-              breakdown: runner.codeResult.breakdown,
-            },
-          };
+          const report = buildReport(runner.codeResult, runnerReview, runnerDecision.finalScore, true, runnerDecision.reason, false, 'runner-up');
+          recordGeneration({
+            timestamp: new Date().toISOString(),
+            theme, language: langCode,
+            codeScore: runner.codeResult.score, reviewScore: runnerReview?.score ?? null,
+            finalScore: runnerDecision.finalScore,
+            accepted: true, fixApplied: false,
+            issues: [...runner.codeResult.issues, ...(runnerReview?.issues ?? [])],
+          });
+          return { ...runner.payload, qualityReport: report };
         }
       }
     }
 
-    // ── Step 7: Both rejected — use best anyway if code ≥ 45 ────
-    // (Soft fallback: slightly below threshold is better than generic fallback)
-    if (best.codeResult.score >= 45) {
-      console.log(`[QC] Soft accept: best story code score ${best.codeResult.score} (below combined threshold but above soft floor)`);
-      return {
-        ...best.payload,
-        qualityReport: {
-          codeScore: best.codeResult.score,
-          reviewScore: reviewResult?.score ?? null,
-          finalScore: decision.finalScore,
-          accepted: false,
-          reason: `Soft accept: ${decision.reason}`,
-          codeIssues: best.codeResult.issues,
-          reviewIssues: reviewResult?.issues ?? [],
-          breakdown: best.codeResult.breakdown,
-        },
-      };
+    // ── Layer 3: Auto-fix on the best candidate ─────────────────
+    console.log('[QC] Both rejected — attempting auto-fix');
+    const fixed = await callFix(best.payload, config, best.codeResult, reviewResult);
+
+    if (fixed) {
+      const fixedCode = validateStory(fixed.content, config);
+      console.log(`[QC] Fixed story code score: ${fixedCode.score}`);
+
+      if (fixedCode.score >= 55) {
+        const report = buildReport(fixedCode, reviewResult, fixedCode.score, true, `Auto-fixed: code ${fixedCode.score}`, true, 'auto-fix');
+        recordGeneration({
+          timestamp: new Date().toISOString(),
+          theme, language: langCode,
+          codeScore: fixedCode.score, reviewScore: reviewResult?.score ?? null,
+          finalScore: fixedCode.score,
+          accepted: true, fixApplied: true,
+          issues: fixedCode.issues,
+        });
+        return { ...fixed, qualityReport: report };
+      }
     }
 
-    console.log('[QC] All candidates rejected — using fallback story');
+    // ── Soft accept if code ≥ 45 ────────────────────────────────
+    if (best.codeResult.score >= 45) {
+      console.log(`[QC] Soft accept: ${best.codeResult.score}`);
+      const report = buildReport(best.codeResult, reviewResult, decision.finalScore, false, `Soft accept: ${decision.reason}`, false, 'soft-accept');
+      recordGeneration({
+        timestamp: new Date().toISOString(),
+        theme, language: langCode,
+        codeScore: best.codeResult.score, reviewScore: reviewResult?.score ?? null,
+        finalScore: decision.finalScore,
+        accepted: false, fixApplied: false,
+        issues: [...best.codeResult.issues, ...(reviewResult?.issues ?? [])],
+      });
+      return { ...best.payload, qualityReport: report };
+    }
+
+    // ── Final fallback ──────────────────────────────────────────
+    console.log('[QC] All layers exhausted — fallback story');
+    recordGeneration({
+      timestamp: new Date().toISOString(),
+      theme, language: langCode,
+      codeScore: best.codeResult.score, reviewScore: reviewResult?.score ?? null,
+      finalScore: decision.finalScore,
+      accepted: false, fixApplied: true,
+      issues: ['All quality layers exhausted — used fallback'],
+    });
     return fallbackStoryPayload(langCode);
   } catch (e) {
     console.error('generateStoryWithCarousel:', e);
