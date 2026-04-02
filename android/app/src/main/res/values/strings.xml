@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Dream Weaver</string>
+    <string name="title_activity_main">Dream Weaver</string>
+    <string name="package_name">com.dreamweaver.app</string>
+    <string name="custom_url_scheme">com.dreamweaver.app</string>
+</resources>
