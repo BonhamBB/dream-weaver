@@ -56,6 +56,17 @@ export interface StoryConfig {
   customPrompt?: string;
 }
 
+export type IllustrationStyle = 'watercolor' | 'cartoon' | 'storybook';
+
+export interface StoryIllustration {
+  /** Index of the scene in the story (0-based) */
+  sceneIndex: number;
+  /** The scene description used for image generation */
+  prompt: string;
+  /** Generated image URL or base64 data URI */
+  imageUrl: string;
+}
+
 export interface Story {
   id: string;
   title: string;
@@ -67,4 +78,6 @@ export interface Story {
   rating?: number;
   progress?: number;
   chapter?: string;
+  /** AI-generated illustrations for story scenes */
+  illustrations?: StoryIllustration[];
 }

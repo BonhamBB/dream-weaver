@@ -16,7 +16,15 @@ import Anthropic from '@anthropic-ai/sdk';
 import { buildClaudePrompt } from './src/lib/storyEngine.ts';
 import { buildReviewPrompt } from './src/lib/storyReviewer.ts';
 import { buildFixPrompt } from './src/lib/storyFixer.ts';
-import type { StoryConfig } from './src/types.ts';
+import {
+  buildSceneExtractionPrompt,
+  buildImagePrompt,
+  extractScenes,
+  getNegativePrompt,
+  illustrationCount,
+  type SceneDescription,
+} from './src/lib/illustrationEngine.ts';
+import type { StoryConfig, IllustrationStyle } from './src/types.ts';
 
 const PORT = Number(process.env.PORT) || 8787;
 
@@ -127,6 +135,12 @@ function sanitizeConfig(config: StoryConfig): void {
 /* ------------------------------------------------------------------ */
 /*  Server Setup                                                       */
 /* ------------------------------------------------------------------ */
+
+function falApiKey(): string | null {
+  const k = process.env.FAL_API_KEY?.trim();
+  if (!k || k === 'your_key_here') return null;
+  return k;
+}
 
 function elevenLabsKey(): string | null {
   const k = process.env.ELEVENLABS_API_KEY?.trim();
@@ -267,6 +281,120 @@ app.post('/api/fix-story', rateLimiter, async (req, res) => {
     console.error('fix-story:', e);
     res.status(500).json({ error: 'Failed to fix story. Please try again.' });
   }
+});
+
+/* ------------------------------------------------------------------ */
+/*  Illustration endpoint — FAL.ai image generation                    */
+/* ------------------------------------------------------------------ */
+
+app.post('/api/illustrations/generate', rateLimiter, async (req, res) => {
+  try {
+    const key = falApiKey();
+    if (!key) {
+      res.status(503).json({ error: 'FAL.ai API key not configured' });
+      return;
+    }
+
+    const { title, content, config } = req.body ?? {};
+    if (typeof content !== 'string' || content.length < 50) {
+      res.status(400).json({ error: 'Missing or too short story content' });
+      return;
+    }
+
+    const storyConfig = config as StoryConfig | undefined;
+    const style: IllustrationStyle = (req.body?.style as IllustrationStyle) || 'watercolor';
+    const targetCount = illustrationCount(storyConfig?.length ?? 'bedtime');
+
+    // Step 1: Extract scenes — try markers first, then use Claude Haiku
+    let scenes: SceneDescription[] = extractScenes(content, targetCount);
+
+    if (scenes.length < 2) {
+      // Use Claude to extract better scene descriptions
+      const prompt = buildSceneExtractionPrompt(content, title ?? '', targetCount);
+      const client = new Anthropic({ apiKey: apiKey() });
+      const msg = await client.messages.create({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1024,
+        messages: [{ role: 'user', content: prompt }],
+      });
+      const block = msg.content[0];
+      const rawText = block?.type === 'text' ? block.text : '[]';
+
+      try {
+        const parsed = JSON.parse(
+          rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, ''),
+        ) as string[];
+        if (Array.isArray(parsed)) {
+          scenes = parsed.slice(0, targetCount).map((desc, i) => ({
+            index: i,
+            description: typeof desc === 'string' ? desc : String(desc),
+            position: Math.floor((content.length / targetCount) * i),
+          }));
+        }
+      } catch {
+        // If Claude's response can't be parsed, keep the fallback scenes
+      }
+    }
+
+    if (scenes.length === 0) {
+      res.json({ illustrations: [] });
+      return;
+    }
+
+    // Step 2: Generate images via FAL.ai (SDXL Lightning — fast + cheap)
+    const imagePromises = scenes.map(async (scene) => {
+      const imagePrompt = buildImagePrompt(scene, style, title ?? '');
+      const negativePrompt = getNegativePrompt();
+
+      const falRes = await fetch('https://fal.run/fal-ai/fast-sdxl', {
+        method: 'POST',
+        headers: {
+          Authorization: `Key ${key}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          prompt: imagePrompt,
+          negative_prompt: negativePrompt,
+          image_size: 'landscape_16_9',
+          num_inference_steps: 4,
+          num_images: 1,
+          enable_safety_checker: true,
+        }),
+      });
+
+      if (!falRes.ok) {
+        const errBody = await falRes.text();
+        console.error(`FAL.ai error for scene ${scene.index}:`, falRes.status, errBody);
+        return null;
+      }
+
+      const falData = (await falRes.json()) as {
+        images?: { url: string; content_type?: string }[];
+      };
+
+      const imageUrl = falData.images?.[0]?.url;
+      if (!imageUrl) return null;
+
+      return {
+        sceneIndex: scene.index,
+        prompt: scene.description,
+        imageUrl,
+      };
+    });
+
+    const results = await Promise.all(imagePromises);
+    const illustrations = results.filter(Boolean);
+
+    console.log(`[Illustrations] Generated ${illustrations.length}/${scenes.length} images`);
+    res.json({ illustrations });
+  } catch (e) {
+    console.error('illustrations/generate:', e);
+    res.status(500).json({ error: 'Failed to generate illustrations. Please try again.' });
+  }
+});
+
+app.get('/api/illustrations/status', rateLimiter, (_req, res) => {
+  res.json({ available: falApiKey() !== null });
 });
 
 /* ------------------------------------------------------------------ */

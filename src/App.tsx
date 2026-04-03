@@ -966,6 +966,82 @@ function parseInteractiveStory(content: string): { segments: string[]; choices: 
   return { segments, choices };
 }
 
+/* ───────── Story Illustrations Component ───────── */
+const StoryWithIllustrations = ({ content, illustrations }: {
+  content: string;
+  illustrations: import('./types').StoryIllustration[];
+}) => {
+  // Split content into paragraphs at double newlines
+  const sections = content.split(/\n\n+/).filter((s) => s.trim().length > 0);
+
+  // Calculate where to insert illustrations (evenly distributed)
+  const step = Math.max(1, Math.floor(sections.length / (illustrations.length + 1)));
+
+  // Build interleaved content: sections with illustrations between them
+  const elements: React.ReactNode[] = [];
+  let illustrationIdx = 0;
+
+  for (let i = 0; i < sections.length; i++) {
+    elements.push(
+      <ReactMarkdown key={`section-${i}`}>{sections[i]!}</ReactMarkdown>,
+    );
+
+    // Insert illustration after every `step` sections
+    if (
+      illustrationIdx < illustrations.length &&
+      (i + 1) % step === 0 &&
+      i < sections.length - 1 // Don't insert after last section
+    ) {
+      const illust = illustrations[illustrationIdx]!;
+      elements.push(
+        <motion.div
+          key={`illust-${illustrationIdx}`}
+          initial={{ opacity: 0, scale: 0.95 }}
+          whileInView={{ opacity: 1, scale: 1 }}
+          viewport={{ once: true }}
+          transition={{ duration: 0.6, ease: 'easeOut' }}
+          className="my-8 overflow-hidden rounded-2xl shadow-lg shadow-black/30"
+        >
+          <img
+            src={illust.imageUrl}
+            alt={illust.prompt}
+            loading="lazy"
+            className="w-full h-auto object-cover"
+            style={{ aspectRatio: '16/9' }}
+          />
+        </motion.div>,
+      );
+      illustrationIdx++;
+    }
+  }
+
+  // If there are remaining illustrations, add them at the end
+  while (illustrationIdx < illustrations.length) {
+    const illust = illustrations[illustrationIdx]!;
+    elements.push(
+      <motion.div
+        key={`illust-end-${illustrationIdx}`}
+        initial={{ opacity: 0, scale: 0.95 }}
+        whileInView={{ opacity: 1, scale: 1 }}
+        viewport={{ once: true }}
+        transition={{ duration: 0.6, ease: 'easeOut' }}
+        className="my-8 overflow-hidden rounded-2xl shadow-lg shadow-black/30"
+      >
+        <img
+          src={illust.imageUrl}
+          alt={illust.prompt}
+          loading="lazy"
+          className="w-full h-auto object-cover"
+          style={{ aspectRatio: '16/9' }}
+        />
+      </motion.div>,
+    );
+    illustrationIdx++;
+  }
+
+  return <>{elements}</>;
+};
+
 /* ───────── Story Reader ───────── */
 const SLEEP_TIMER_OPTIONS = [5, 10, 15, 20, 30];
 
@@ -1309,7 +1385,12 @@ const StoryReader = ({
           <div className="soft-divider" />
 
           <div dir={contentDir} className="story-prose">
-            <ReactMarkdown>{mainMd}</ReactMarkdown>
+            {/* Render story with inline illustrations */}
+            {story.illustrations && story.illustrations.length > 0 ? (
+              <StoryWithIllustrations content={mainMd} illustrations={story.illustrations} />
+            ) : (
+              <ReactMarkdown>{mainMd}</ReactMarkdown>
+            )}
 
             {/* Interactive mode: show choice cards if there's a pending choice */}
             {hasNextChoice && parsed && nextChoiceIdx >= 0 && (
@@ -2241,6 +2322,7 @@ export default function App() {
         config: cfg,
         createdAt: new Date().toISOString(),
         rating: 0,
+        illustrations: result.illustrations,
       };
       saveStory(newStory);
       setSavedStories(loadStories());

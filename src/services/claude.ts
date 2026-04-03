@@ -28,11 +28,13 @@ import type { AppLangCode } from '../lib/lang';
 import { validateStory, type ValidationResult } from '../lib/storyValidator';
 import { parseReviewResponse, combineScores, type ReviewResult } from '../lib/storyReviewer';
 import { recordGeneration, isThemeStruggling, getThemeWeaknesses } from '../lib/storyMemory';
-import type { StoryConfig } from '../types';
+import { generateIllustrations } from './illustrations';
+import type { StoryConfig, StoryIllustration } from '../types';
 
 export interface GeneratedStoryPayload {
   title: string;
   content: string;
+  illustrations?: StoryIllustration[];
 }
 
 /** Quality metadata attached to the generated story */
@@ -236,12 +238,13 @@ These are the most common problems. Address them proactively in your story.`;
     // Very low code score = skip everything
     if (best.codeResult.score < 30) {
       console.log('[QC] Both below minimum — attempting auto-fix on best');
-      // Still try auto-fix before giving up
       const fixed = await callFix(best.payload, config, best.codeResult, null);
       if (fixed) {
         const fixedCode = validateStory(fixed.content, config);
         if (fixedCode.score >= 50) {
           console.log(`[QC] Auto-fix salvaged story: ${fixedCode.score}`);
+          // Generate illustrations for the fixed story
+          const illustrations = await generateIllustrations(fixed, config).catch(() => []);
           const report = buildReport(fixedCode, null, fixedCode.score, true, 'Salvaged via auto-fix', true, 'auto-fix');
           recordGeneration({
             timestamp: new Date().toISOString(),
@@ -249,7 +252,7 @@ These are the most common problems. Address them proactively in your story.`;
             codeScore: fixedCode.score, reviewScore: null, finalScore: fixedCode.score,
             accepted: true, fixApplied: true, issues: fixedCode.issues,
           });
-          return { ...fixed, qualityReport: report };
+          return { ...fixed, illustrations, qualityReport: report };
         }
       }
       recordGeneration({
@@ -260,6 +263,10 @@ These are the most common problems. Address them proactively in your story.`;
       });
       return fallbackStoryPayload(langCode);
     }
+
+    // ── Start illustration generation in PARALLEL with review ───
+    // This means zero extra wait time — images generate while Claude reviews
+    const illustrationPromise = generateIllustrations(best.payload, config).catch(() => [] as StoryIllustration[]);
 
     // ── Layer 2: Claude semantic review on best ─────────────────
     const reviewResult = await callReview(best.payload, config, best.codeResult);
@@ -272,6 +279,7 @@ These are the most common problems. Address them proactively in your story.`;
     console.log(`[QC] Decision: ${decision.reason}`);
 
     if (decision.accepted) {
+      const illustrations = await illustrationPromise;
       const report = buildReport(best.codeResult, reviewResult, decision.finalScore, true, decision.reason, false, 'carousel');
       recordGeneration({
         timestamp: new Date().toISOString(),
@@ -281,7 +289,7 @@ These are the most common problems. Address them proactively in your story.`;
         accepted: true, fixApplied: false,
         issues: [...best.codeResult.issues, ...(reviewResult?.issues ?? [])],
       });
-      return { ...best.payload, qualityReport: report };
+      return { ...best.payload, illustrations, qualityReport: report };
     }
 
     // ── Try runner-up ───────────────────────────────────────────
@@ -293,6 +301,8 @@ These are the most common problems. Address them proactively in your story.`;
         const runnerDecision = combineScores(runner.codeResult, runnerReview);
 
         if (runnerDecision.accepted) {
+          // Generate illustrations for runner-up (best's illustrations are for wrong story)
+          const runnerIllustrations = await generateIllustrations(runner.payload, config).catch(() => []);
           const report = buildReport(runner.codeResult, runnerReview, runnerDecision.finalScore, true, runnerDecision.reason, false, 'runner-up');
           recordGeneration({
             timestamp: new Date().toISOString(),
@@ -302,7 +312,7 @@ These are the most common problems. Address them proactively in your story.`;
             accepted: true, fixApplied: false,
             issues: [...runner.codeResult.issues, ...(runnerReview?.issues ?? [])],
           });
-          return { ...runner.payload, qualityReport: report };
+          return { ...runner.payload, illustrations: runnerIllustrations, qualityReport: report };
         }
       }
     }
@@ -316,6 +326,8 @@ These are the most common problems. Address them proactively in your story.`;
       console.log(`[QC] Fixed story code score: ${fixedCode.score}`);
 
       if (fixedCode.score >= 55) {
+        // Use best's illustrations if content similar, otherwise regenerate
+        const illustrations = await illustrationPromise;
         const report = buildReport(fixedCode, reviewResult, fixedCode.score, true, `Auto-fixed: code ${fixedCode.score}`, true, 'auto-fix');
         recordGeneration({
           timestamp: new Date().toISOString(),
@@ -325,12 +337,13 @@ These are the most common problems. Address them proactively in your story.`;
           accepted: true, fixApplied: true,
           issues: fixedCode.issues,
         });
-        return { ...fixed, qualityReport: report };
+        return { ...fixed, illustrations, qualityReport: report };
       }
     }
 
     // ── Soft accept if code ≥ 45 ────────────────────────────────
     if (best.codeResult.score >= 45) {
+      const illustrations = await illustrationPromise;
       console.log(`[QC] Soft accept: ${best.codeResult.score}`);
       const report = buildReport(best.codeResult, reviewResult, decision.finalScore, false, `Soft accept: ${decision.reason}`, false, 'soft-accept');
       recordGeneration({
@@ -341,7 +354,7 @@ These are the most common problems. Address them proactively in your story.`;
         accepted: false, fixApplied: false,
         issues: [...best.codeResult.issues, ...(reviewResult?.issues ?? [])],
       });
-      return { ...best.payload, qualityReport: report };
+      return { ...best.payload, illustrations, qualityReport: report };
     }
 
     // ── Final fallback ──────────────────────────────────────────
