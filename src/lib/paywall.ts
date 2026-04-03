@@ -18,7 +18,7 @@ export interface SubscriptionState {
 }
 
 const LS_KEY = 'dw-subscription';
-const FREE_DAILY_LIMIT = 2;
+const FREE_DAILY_LIMIT = 999; // DEV MODE — restore to 2 before launch
 
 // RevenueCat product identifiers (match Google Play Console)
 export const RC_PRODUCT_MONTHLY = 'dreamweaver_premium_monthly';
