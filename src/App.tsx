@@ -2304,8 +2304,9 @@ export default function App() {
   };
 
   const runStoryGeneration = async (cfg: StoryConfig) => {
-    // Paywall check
-    if (!canGenerateStory()) {
+    // Paywall check — skip on web for dev testing
+    const isNative = typeof (window as unknown as Record<string, unknown>).Capacitor !== 'undefined';
+    if (isNative && !canGenerateStory()) {
       setScreen('upgrade');
       return;
     }
