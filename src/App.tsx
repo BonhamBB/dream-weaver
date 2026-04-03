@@ -63,7 +63,7 @@ import type {
   StoryMode,
   AgeFocus,
 } from './types';
-import { generateStoryWithCarousel } from './services/claude';
+import { generateStoryWithCarousel, loadIllustrationsForStory } from './services/claude';
 import ReactMarkdown from 'react-markdown';
 import LZString from 'lz-string';
 
@@ -2322,13 +2322,25 @@ export default function App() {
         config: cfg,
         createdAt: new Date().toISOString(),
         rating: 0,
-        illustrations: result.illustrations,
       };
       saveStory(newStory);
       setSavedStories(loadStories());
       setSelectedStory(newStory);
       setScreen('reader');
       recordStoryGeneration();
+
+      // Load illustrations in background AFTER story is shown
+      loadIllustrationsForStory(
+        { title: newStory.title, content: newStory.content },
+        cfg,
+      ).then((illustrations) => {
+        if (illustrations.length > 0) {
+          const updated = { ...newStory, illustrations };
+          saveStory(updated);
+          setSavedStories(loadStories());
+          setSelectedStory(updated);
+        }
+      }).catch(() => { /* illustrations are optional */ });
       recordStoryEvent({
         storyId: newStory.id,
         childProfileId: null,
